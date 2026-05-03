@@ -75,13 +75,13 @@ class SimpliSafeAlarmDecoderBridgePlatform {
   }
 
   async _init() {
-    // Give the UI plugin time to fully come up and discover all child bridges.
+    // Give the UI plugin time to fully come up.
     await new Promise(r => setTimeout(r, 5000));
 
     await this._login();
+    this._scheduleTokenRefresh();
     await this._discoverAccessories();
     this._connectSocket();
-    this._scheduleTokenRefresh();
   }
 
   async _login() {
@@ -144,7 +144,7 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     this.tokenTimer = setTimeout(() => this._refreshToken(), delay);
   }
 
-  async _discoverAccessories() {
+  async _fetchAccessories() {
     const url = `${this.config.hb_ui_url}/api/accessories`;
     const response = await fetch(url, {
       headers: { 'Authorization': `Bearer ${this.token}` },
@@ -152,16 +152,44 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     if (!response.ok) {
       throw new Error(`Failed to fetch accessories from UI: ${response.status} ${response.statusText}`);
     }
-    const accessories = await response.json();
+    return response.json();
+  }
 
-    const ssAcc = accessories.find(a => a.serviceName === this.config.simplisafe_name);
-    const adAcc = accessories.find(a => a.serviceName === this.config.ad_accessory_name);
+  async _discoverAccessories() {
+    // Child bridges run in separate processes — the UI takes time to pair with each
+    // via HAP, so the accessories list may start empty and gradually populate.
+    const maxAttempts = 15;
+    const retryDelay = 4000;  // up to 60s of retries
+
+    let ssAcc = null;
+    let adAcc = null;
+    let lastSeen = [];
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const accessories = await this._fetchAccessories();
+      lastSeen = accessories;
+
+      ssAcc = accessories.find(a => a.serviceName === this.config.simplisafe_name);
+      adAcc = accessories.find(a => a.serviceName === this.config.ad_accessory_name);
+
+      if (ssAcc && adAcc) break;
+
+      if (attempt < maxAttempts) {
+        this.log.debug(
+          `Discovery attempt ${attempt}/${maxAttempts}: ${accessories.length} accessories visible, ` +
+          `SS=${ssAcc ? 'found' : 'missing'}, AD=${adAcc ? 'found' : 'missing'}; retrying in ${retryDelay / 1000}s...`
+        );
+        await new Promise(r => setTimeout(r, retryDelay));
+      }
+    }
 
     if (!ssAcc || !adAcc) {
-      const names = accessories.map(a => `"${a.serviceName}"`).join(', ');
+      const names = lastSeen.length
+        ? lastSeen.map(a => `"${a.serviceName}"`).join(', ')
+        : '(none — UI returned an empty accessory list. Verify child bridges are running and the UI user has admin role.)';
       if (!ssAcc) this.log.error(`SimpliSafe accessory "${this.config.simplisafe_name}" not found. Available: ${names}`);
       if (!adAcc) this.log.error(`AlarmDecoder accessory "${this.config.ad_accessory_name}" not found. Available: ${names}`);
-      throw new Error('Required accessories not found in Homebridge UI');
+      throw new Error('Required accessories not found in Homebridge UI after retries');
     }
 
     if (!ssAcc.serviceCharacteristics?.find(c => c.type === 'SecuritySystemCurrentState')) {
