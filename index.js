@@ -98,21 +98,33 @@ class SimpliSafeAlarmDecoderBridgePlatform {
 
   async _login() {
     const url = `${this.config.hb_ui_url}/api/auth/login`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: this.config.hb_ui_username,
-        password: this.config.hb_ui_password,
-      }),
-    });
-    if (!response.ok) {
-      throw new Error(`Homebridge UI login failed (${response.status} ${response.statusText})`);
+    const maxAttempts = 10;
+    const retryDelay = 6000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: this.config.hb_ui_username,
+            password: this.config.hb_ui_password,
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(`Homebridge UI login failed (${response.status} ${response.statusText})`);
+        }
+        const data = await response.json();
+        this.token = data.access_token;
+        this.tokenExpiresAt = Date.now() + (data.expires_in * 1000);
+        this.log.info('Authenticated to Homebridge UI');
+        return;
+      } catch (err) {
+        if (attempt === maxAttempts) throw err;
+        this.log.warn(`Homebridge UI not ready (attempt ${attempt}/${maxAttempts}): ${err.message} — retrying in ${retryDelay / 1000}s...`);
+        await new Promise(r => setTimeout(r, retryDelay));
+      }
     }
-    const data = await response.json();
-    this.token = data.access_token;
-    this.tokenExpiresAt = Date.now() + (data.expires_in * 1000);
-    this.log.info('Authenticated to Homebridge UI');
   }
 
   async _refreshToken() {
@@ -417,7 +429,11 @@ class SimpliSafeAlarmDecoderBridgePlatform {
         this.log.error(`AlarmDecoder API responded ${response.status} ${response.statusText} for ${stateLabel}`);
       }
     } catch (err) {
-      this.log.error(`Failed to reach AlarmDecoder at ${url}: ${err.message}`);
+      const cause = err.cause ? ` (${err.cause.code ?? err.cause.message})` : '';
+      this.log.error(`Failed to reach AlarmDecoder at ${url}: ${err.message}${cause}`);
+      if (err.cause?.code === 'ENOTFOUND') {
+        this.log.error('Tip: .local hostnames may not resolve on Linux. Try using the IP address for ad_host instead.');
+      }
     }
   }
 
