@@ -26,7 +26,48 @@ class SimpliSafeAlarmDecoderBridgePlatform {
 
     if (!this._validateConfig()) return;
 
-    this.api.on('didFinishLaunching', () => this._didFinishLaunching());
+    // Wrap so an unhandled exception here can never crash the Homebridge process.
+    this.api.on('didFinishLaunching', async () => {
+      try {
+        await this._didFinishLaunching();
+      } catch (err) {
+        this.log.error(`Bridge initialization failed: ${err.message}`);
+        if (err.stack) this.log.error(err.stack);
+      }
+    });
+  }
+
+  async _discoverBridge() {
+    // Future-proof: if a Homebridge version ever exposes the bridge directly, prefer it.
+    if (this.api._bridge && Array.isArray(this.api._bridge.bridgedAccessories)) {
+      return this.api._bridge;
+    }
+
+    // Register a transient PlatformAccessory; once Homebridge bridges it,
+    // its underlying HAP Accessory's `.bridge` field points to the singleton main Bridge,
+    // whose `bridgedAccessories` array contains every accessory from every plugin.
+    const PA = this.api.platformAccessory;
+    const uuid = this.api.hap.uuid.generate(PLUGIN_NAME + '.discovery');
+    const dummy = new PA('SS-AD Bridge Discovery', uuid);
+
+    let bridge = null;
+    try {
+      this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [dummy]);
+
+      // Poll up to ~3s for Homebridge to finish bridging the accessory.
+      for (let i = 0; i < 30 && !bridge; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        bridge = dummy._associatedHAPAccessory && dummy._associatedHAPAccessory.bridge;
+      }
+    } finally {
+      try {
+        this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [dummy]);
+      } catch (err) {
+        this.log.debug(`Discovery cleanup error (safe to ignore): ${err.message}`);
+      }
+    }
+
+    return bridge;
   }
 
   // Required by Homebridge platform contract; this plugin registers no accessories of its own.
@@ -46,8 +87,14 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     // Give all platform plugins time to register their accessories with the bridge.
     await new Promise(resolve => setTimeout(resolve, 1000));
 
+    const bridge = await this._discoverBridge();
+    if (!bridge) {
+      this.log.error('Could not obtain a reference to the Homebridge bridge — cross-plugin observation is unavailable.');
+      return;
+    }
+
     const { simplisafe_name, ad_accessory_name } = this.config;
-    const all = this.api._bridge.bridgedAccessories || [];
+    const all = bridge.bridgedAccessories || [];
 
     const ssAcc = all.find(a => a.displayName === simplisafe_name);
     const adAcc = all.find(a => a.displayName === ad_accessory_name);
@@ -87,22 +134,30 @@ class SimpliSafeAlarmDecoderBridgePlatform {
   // SimpliSafe → AlarmDecoder
   _subscribeForward() {
     this.ssChar.on('change', ({ oldValue, newValue }) => {
-      if (this.adChar.value === newValue) return;
-      const label = STATE_NAMES[newValue] ?? newValue;
-      this.log.info(`SS state changed: ${STATE_NAMES[oldValue] ?? oldValue} → ${label}`);
-      const keys = this._stateToKeys(newValue);
-      if (keys !== null) this._sendToAlarmDecoder(keys, label);
+      try {
+        if (this.adChar.value === newValue) return;
+        const label = STATE_NAMES[newValue] ?? newValue;
+        this.log.info(`SS state changed: ${STATE_NAMES[oldValue] ?? oldValue} → ${label}`);
+        const keys = this._stateToKeys(newValue);
+        if (keys !== null) this._sendToAlarmDecoder(keys, label);
+      } catch (err) {
+        this.log.error(`Forward handler error: ${err.message}`);
+      }
     });
   }
 
   // AlarmDecoder → SimpliSafe
   _subscribeReverse() {
     this.adChar.on('change', ({ oldValue, newValue }) => {
-      if (this.ssChar.value === newValue) return;
-      this.log.info(
-        `AD state changed: ${STATE_NAMES[oldValue] ?? oldValue} → ${STATE_NAMES[newValue] ?? newValue} — updating SimpliSafe`
-      );
-      this.ssChar.updateValue(newValue);
+      try {
+        if (this.ssChar.value === newValue) return;
+        this.log.info(
+          `AD state changed: ${STATE_NAMES[oldValue] ?? oldValue} → ${STATE_NAMES[newValue] ?? newValue} — updating SimpliSafe`
+        );
+        this.ssChar.updateValue(newValue);
+      } catch (err) {
+        this.log.error(`Reverse handler error: ${err.message}`);
+      }
     });
   }
 
