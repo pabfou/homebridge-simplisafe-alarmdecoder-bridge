@@ -1,0 +1,31 @@
+{
+  "name": "homebridge-simplisafe-alarmdecoder-bridge",
+  "version": "1.0.0",
+  "description": "Homebridge platform plugin that bidirectionally bridges SimpliSafe3 HomeKit state changes to an AlarmDecoder/Vista 20P alarm panel.",
+  "main": "index.js",
+  "keywords": [
+    "homebridge-plugin",
+    "homebridge",
+    "simplisafe",
+    "alarmdecoder",
+    "vista",
+    "security"
+  ],
+  "engines": {
+    "node": ">=18.15.0",
+    "homebridge": ">=1.8.0"
+  },
+  "peerDependencies": {
+    "homebridge": ">=1.8.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pabfou/homebridge-simplisafe-alarmdecoder-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pabfou/homebridge-simplisafe-alarmdecoder-bridge/issues"
+  },
+  "homepage": "https://github.com/pabfou/homebridge-simplisafe-alarmdecoder-bridge#readme",
+  "author": "pabfou",
+  "license": "MIT"
+}

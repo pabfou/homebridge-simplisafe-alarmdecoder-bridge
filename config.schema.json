@@ -1,0 +1,75 @@
+{
+  "pluginAlias": "SimpliSafeAlarmDecoderBridge",
+  "pluginType": "platform",
+  "singular": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "SimpliSafe AlarmDecoder Bridge",
+        "required": true
+      },
+      "simplisafe_name": {
+        "title": "SimpliSafe Accessory Name",
+        "type": "string",
+        "required": true,
+        "description": "Display name of the SimpliSafe3 SecuritySystem accessory in HomeKit (must match exactly)."
+      },
+      "ad_accessory_name": {
+        "title": "AlarmDecoder Accessory Name",
+        "type": "string",
+        "required": true,
+        "description": "Display name of the AlarmDecoder SecuritySystem accessory in HomeKit (must match exactly)."
+      },
+      "alarm_code": {
+        "title": "Alarm Code (PIN)",
+        "type": "string",
+        "required": true,
+        "description": "Your alarm panel PIN. Sent as a keystring prefix to the AlarmDecoder webapp.",
+        "x-schema-form": {
+          "type": "password"
+        }
+      },
+      "ad_host": {
+        "title": "AlarmDecoder Host",
+        "type": "string",
+        "required": true,
+        "placeholder": "192.168.1.100",
+        "description": "IP address or hostname of the AlarmDecoder webapp."
+      },
+      "ad_port": {
+        "title": "AlarmDecoder Port",
+        "type": "integer",
+        "default": 5000,
+        "required": true,
+        "description": "TCP port of the AlarmDecoder webapp REST API."
+      },
+      "ad_api_key": {
+        "title": "AlarmDecoder API Key",
+        "type": "string",
+        "required": true,
+        "description": "API key from the AlarmDecoder web interface. Sent as the Authorization header.",
+        "x-schema-form": {
+          "type": "password"
+        }
+      }
+    }
+  },
+  "form": [
+    "name",
+    "simplisafe_name",
+    "ad_accessory_name",
+    {
+      "key": "alarm_code",
+      "type": "password"
+    },
+    "ad_host",
+    "ad_port",
+    {
+      "key": "ad_api_key",
+      "type": "password"
+    }
+  ]
+}
