@@ -12,10 +12,12 @@ This bridge plugin connects to **homebridge-config-ui-x** (the standard Homebrid
 
 | Direction | Trigger | Action |
 |---|---|---|
-| **SimpliSafe → AlarmDecoder** | `SecuritySystemCurrentState` changes on the SimpliSafe accessory | POSTs a keypress to the AlarmDecoder webapp REST API |
-| **AlarmDecoder → SimpliSafe** | `SecuritySystemCurrentState` changes on the AlarmDecoder accessory | Updates the SimpliSafe characteristic via the UI API |
+| **SimpliSafe → AlarmDecoder** | `SecuritySystemTargetState` changes on the SimpliSafe accessory | POSTs a keypress sequence to the AlarmDecoder webapp REST API |
+| **AlarmDecoder → SimpliSafe** | `SecuritySystemTargetState` (or `CurrentState`) changes on the AlarmDecoder accessory | Sets `SecuritySystemTargetState` on the SimpliSafe accessory via the Homebridge UI API |
 
 State changes are only forwarded when the two accessories are out of sync, preventing feedback loops.
+
+Both directions are near-instant when triggered from the Home app (socket push). A 3-second REST poll also runs as a fallback to catch any events the socket misses (e.g. physical keypad presses).
 
 ### State Mapping (SimpliSafe → AlarmDecoder keypresses)
 
@@ -33,7 +35,7 @@ State changes are only forwarded when the two accessories are out of sync, preve
 
 - [Homebridge](https://homebridge.io) v1.8.0 or later
 - Node.js v18.15.0 or later
-- [`homebridge-config-ui-x`](https://github.com/homebridge/homebridge-config-ui-x) installed and reachable from the plugin (the default Homebridge web UI — almost certainly already installed)
+- [`homebridge-config-ui-x`](https://github.com/homebridge/homebridge-config-ui-x) installed (the default Homebridge web UI — almost certainly already present)
 - [`homebridge-simplisafe3`](https://github.com/homebridge-simplisafe3/homebridge-simplisafe3) running in the same Homebridge instance
 - A `homebridge-alarmdecoder-platform` plugin running in the same Homebridge instance
 - [AlarmDecoder webapp](https://github.com/nutechsoftware/alarmdecoder-webapp) accessible on your network
@@ -74,8 +76,8 @@ Add a platform entry to your Homebridge `config.json`:
     {
       "platform": "SimpliSafeAlarmDecoderBridge",
       "name": "SimpliSafe AlarmDecoder Bridge",
-      "simplisafe_name": "Home Alarm",
-      "ad_accessory_name": "Vista Panel",
+      "simplisafe_name": "SimpliSafe 3",
+      "ad_accessory_name": "ADT",
       "alarm_code": "1234",
       "ad_host": "192.168.1.100",
       "ad_port": 5000,
@@ -96,17 +98,19 @@ Or use the **Homebridge UI** — the plugin ships with a full configuration sche
 |---|---|---|---|---|
 | `platform` | string | yes | — | Must be `SimpliSafeAlarmDecoderBridge` |
 | `name` | string | yes | — | Display name for this platform instance |
-| `simplisafe_name` | string | yes | — | Exact display name of the SimpliSafe3 `SecuritySystem` accessory in HomeKit |
-| `ad_accessory_name` | string | yes | — | Exact display name of the AlarmDecoder `SecuritySystem` accessory in HomeKit |
+| `simplisafe_name` | string | yes | — | Exact service name of the SimpliSafe3 `SecuritySystem` accessory as shown in the Homebridge UI Accessories tab |
+| `ad_accessory_name` | string | yes | — | Exact service name of the AlarmDecoder `SecuritySystem` accessory as shown in the Homebridge UI Accessories tab |
 | `alarm_code` | string | yes | — | Your alarm panel PIN code |
-| `ad_host` | string | yes | — | IP address or hostname of the AlarmDecoder webapp |
-| `ad_port` | integer | yes | `5000` | TCP port of the AlarmDecoder webapp |
+| `ad_host` | string | yes | — | IP address of the AlarmDecoder webapp host (see note below) |
+| `ad_port` | integer | yes | `5000` | TCP port of the AlarmDecoder webapp (default is `5000`) |
 | `ad_api_key` | string | yes | — | API key from the AlarmDecoder web interface |
-| `hb_ui_url` | string | yes | `http://localhost:8581` | Base URL of homebridge-config-ui-x |
+| `hb_ui_url` | string | no | `http://localhost:8581` | Base URL of homebridge-config-ui-x (see note below) |
 | `hb_ui_username` | string | yes | — | Username of the dedicated UI user created above |
 | `hb_ui_password` | string | yes | — | Password of that user |
 
-> **Finding accessory names**: `simplisafe_name` and `ad_accessory_name` must exactly match the **service names** the Homebridge UI uses for those accessories (typically the same as the Home app display name). If a name is wrong, the plugin logs all available accessory names on startup so you can correct it.
+> **Finding accessory names**: `simplisafe_name` and `ad_accessory_name` must exactly match the **service names** shown in the Homebridge UI → Accessories tab — not the child bridge name. On startup the plugin logs every accessory name it discovers, so if the name is wrong you can copy the correct one directly from the log.
+
+> **Use IP addresses, not `.local` hostnames**: Homebridge runs on Linux, where `.local` mDNS hostnames (e.g. `alarmdecoder.local`) do not resolve without additional OS configuration. Use the device's IP address for `ad_host`. The same applies to `hb_ui_url` — keep it as `http://localhost:8581` (the default) since the plugin runs on the same machine as Homebridge.
 
 ### Getting Your AlarmDecoder API Key
 
@@ -118,15 +122,19 @@ Or use the **Homebridge UI** — the plugin ships with a full configuration sche
 
 ## Troubleshooting
 
+**"Homebridge UI not ready … retrying"** on every startup — The plugin retries login for up to 60 seconds while waiting for homebridge-config-ui-x to start. This is normal on a fresh boot. If it never succeeds, verify `hb_ui_url` is `http://localhost:8581` and that homebridge-config-ui-x is installed.
+
 **"Homebridge UI login failed (401 …)"** — `hb_ui_username` or `hb_ui_password` is wrong, or the user doesn't have admin role.
 
-**"Homebridge UI login failed (ECONNREFUSED …)"** — The UI isn't running at `hb_ui_url`. Verify the URL and port (default `http://localhost:8581`).
+**"SimpliSafe accessory not found"** / **"AlarmDecoder accessory not found"** — The name in config doesn't match. Check the Homebridge log for `[discovery] Saw accessory:` lines — those list every service name visible to the plugin. Copy the correct name into `simplisafe_name` or `ad_accessory_name`.
 
-**"SimpliSafe accessory not found"** / **"AlarmDecoder accessory not found"** — The display name doesn't match. The log lists all available accessory names — copy one of those into the config.
+**"Failed to reach AlarmDecoder … (ECONNREFUSED)"** — Wrong port. Open `http://<ad_host>:<ad_port>` in your browser. If it doesn't load, try port `5000` (the default). Update `ad_port` accordingly.
 
-**"Failed to reach AlarmDecoder"** — Verify `ad_host`, `ad_port`, and that the AlarmDecoder webapp is running and reachable from the Homebridge host.
+**"Failed to reach AlarmDecoder … (ENOTFOUND)"** — The hostname can't be resolved. Replace `.local` hostnames with the device's IP address in `ad_host`.
 
-**"AlarmDecoder API responded 401"** — The `ad_api_key` is incorrect.
+**"AlarmDecoder API responded 401"** — The `ad_api_key` is incorrect. Retrieve it from the AlarmDecoder webapp under **Settings → API**.
+
+**SS → AD works but AD → SS is slow** — The plugin polls state every 3 seconds as a fallback. If the Homebridge UI socket push is slow for your setup, the delay will be at most 3 seconds. This is normal.
 
 ---
 
