@@ -10,7 +10,7 @@ const DISCOVERY_POLL_MS = 8_000;
 // Log the full seen-names list after this many ms without discovery.
 const DISCOVERY_WARN_MS = 60_000;
 // How often to poll the REST API as a fallback to socket events.
-const STATE_POLL_MS = 15_000;
+const STATE_POLL_MS = 3_000;
 
 const STATE_NAMES = {
   0: 'STAY_ARM',
@@ -120,8 +120,10 @@ class SimpliSafeAlarmDecoderBridgePlatform {
         this.log.info('Authenticated to Homebridge UI');
         return;
       } catch (err) {
+        const cause = err.cause ? ` [${err.cause.code ?? err.cause.message}]` : '';
+        if (attempt === 1) this.log.warn(`Connecting to Homebridge UI at: ${url}`);
         if (attempt === maxAttempts) throw err;
-        this.log.warn(`Homebridge UI not ready (attempt ${attempt}/${maxAttempts}): ${err.message} — retrying in ${retryDelay / 1000}s...`);
+        this.log.warn(`Homebridge UI not ready (attempt ${attempt}/${maxAttempts}): ${err.message}${cause} — retrying in ${retryDelay / 1000}s...`);
         await new Promise(r => setTimeout(r, retryDelay));
       }
     }
