@@ -5,6 +5,11 @@ const { io } = require('socket.io-client');
 const PLUGIN_NAME = 'homebridge-simplisafe-alarmdecoder-bridge';
 const PLATFORM_NAME = 'SimpliSafeAlarmDecoderBridge';
 
+// How often to re-emit get-accessories until both are discovered.
+const DISCOVERY_POLL_MS = 8_000;
+// Log the full seen-names list after this many ms without discovery.
+const DISCOVERY_WARN_MS = 60_000;
+
 const STATE_NAMES = {
   0: 'STAY_ARM',
   1: 'AWAY_ARM',
@@ -34,9 +39,14 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     this.ssLastValue = null;
     this.adLastValue = null;
 
+    this._discoveryComplete = false;
+    this._discoveryInterval = null;
+    this._discoveryWarnTimer = null;
+    // Collect every serviceName seen during discovery for diagnostics.
+    this._seenNames = new Set();
+
     if (!this._validateConfig()) return;
 
-    // Wrap so a failure here can never crash the Homebridge process.
     this.api.on('didFinishLaunching', async () => {
       try {
         await this._init();
@@ -69,7 +79,6 @@ class SimpliSafeAlarmDecoderBridgePlatform {
       return false;
     }
     if (!this.config.hb_ui_url) this.config.hb_ui_url = 'http://localhost:8581';
-    // Strip trailing slash for clean URL building.
     this.config.hb_ui_url = this.config.hb_ui_url.replace(/\/+$/, '');
     return true;
   }
@@ -80,9 +89,13 @@ class SimpliSafeAlarmDecoderBridgePlatform {
 
     await this._login();
     this._scheduleTokenRefresh();
-    await this._discoverAccessories();
+
+    // Socket-first: connect and discover organically via accessories-data events.
     this._connectSocket();
+    this._startDiscoveryPoller();
   }
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
 
   async _login() {
     const url = `${this.config.hb_ui_url}/api/auth/login`;
@@ -117,7 +130,6 @@ class SimpliSafeAlarmDecoderBridgePlatform {
         this.token = data.access_token;
         this.tokenExpiresAt = Date.now() + (data.expires_in * 1000);
         this.log.debug('Homebridge UI token refreshed');
-        // Reconnect socket with the fresh token.
         this._reconnectSocket();
       } else {
         this.log.warn(`Token refresh returned ${response.status}; falling back to full re-login`);
@@ -139,74 +151,56 @@ class SimpliSafeAlarmDecoderBridgePlatform {
   _scheduleTokenRefresh() {
     if (this.tokenTimer) clearTimeout(this.tokenTimer);
     const remaining = this.tokenExpiresAt - Date.now();
-    // Refresh at 80% of remaining lifetime, with a 1-minute floor.
     const delay = Math.max(60_000, Math.floor(remaining * 0.8));
     this.tokenTimer = setTimeout(() => this._refreshToken(), delay);
   }
 
-  async _fetchAccessories() {
-    const url = `${this.config.hb_ui_url}/api/accessories`;
-    const response = await fetch(url, {
-      headers: { 'Authorization': `Bearer ${this.token}` },
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch accessories from UI: ${response.status} ${response.statusText}`);
-    }
-    return response.json();
-  }
+  // ── Discovery ─────────────────────────────────────────────────────────────
 
-  async _discoverAccessories() {
-    // Child bridges run in separate processes — the UI takes time to pair with each
-    // via HAP, so the accessories list may start empty and gradually populate.
-    const maxAttempts = 15;
-    const retryDelay = 4000;  // up to 60s of retries
-
-    let ssAcc = null;
-    let adAcc = null;
-    let lastSeen = [];
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const accessories = await this._fetchAccessories();
-      lastSeen = accessories;
-
-      ssAcc = accessories.find(a => a.serviceName === this.config.simplisafe_name);
-      adAcc = accessories.find(a => a.serviceName === this.config.ad_accessory_name);
-
-      if (ssAcc && adAcc) break;
-
-      if (attempt < maxAttempts) {
-        this.log.debug(
-          `Discovery attempt ${attempt}/${maxAttempts}: ${accessories.length} accessories visible, ` +
-          `SS=${ssAcc ? 'found' : 'missing'}, AD=${adAcc ? 'found' : 'missing'}; retrying in ${retryDelay / 1000}s...`
-        );
-        await new Promise(r => setTimeout(r, retryDelay));
+  _startDiscoveryPoller() {
+    // Emit get-accessories every DISCOVERY_POLL_MS until both accessories are found.
+    this._discoveryInterval = setInterval(() => {
+      if (this._discoveryComplete) {
+        clearInterval(this._discoveryInterval);
+        this._discoveryInterval = null;
+        if (this._discoveryWarnTimer) {
+          clearTimeout(this._discoveryWarnTimer);
+          this._discoveryWarnTimer = null;
+        }
+        return;
       }
-    }
+      if (this.socket?.connected) {
+        this.log.debug('Polling for accessories via socket...');
+        this.socket.emit('get-accessories');
+      }
+    }, DISCOVERY_POLL_MS);
 
-    if (!ssAcc || !adAcc) {
-      const names = lastSeen.length
-        ? lastSeen.map(a => `"${a.serviceName}"`).join(', ')
-        : '(none — UI returned an empty accessory list. Verify child bridges are running and the UI user has admin role.)';
-      if (!ssAcc) this.log.error(`SimpliSafe accessory "${this.config.simplisafe_name}" not found. Available: ${names}`);
-      if (!adAcc) this.log.error(`AlarmDecoder accessory "${this.config.ad_accessory_name}" not found. Available: ${names}`);
-      throw new Error('Required accessories not found in Homebridge UI after retries');
-    }
-
-    if (!ssAcc.serviceCharacteristics?.find(c => c.type === 'SecuritySystemCurrentState')) {
-      throw new Error(`"${this.config.simplisafe_name}" has no SecuritySystemCurrentState characteristic`);
-    }
-    if (!adAcc.serviceCharacteristics?.find(c => c.type === 'SecuritySystemCurrentState')) {
-      throw new Error(`"${this.config.ad_accessory_name}" has no SecuritySystemCurrentState characteristic`);
-    }
-
-    this.ssUniqueId = ssAcc.uniqueId;
-    this.adUniqueId = adAcc.uniqueId;
-    this.ssLastValue = ssAcc.values?.SecuritySystemCurrentState ?? null;
-    this.adLastValue = adAcc.values?.SecuritySystemCurrentState ?? null;
-
-    this.log.info(`Found SS "${this.config.simplisafe_name}" (state: ${this._stateLabel(this.ssLastValue)}, uniqueId ${this.ssUniqueId.slice(0, 12)}...)`);
-    this.log.info(`Found AD "${this.config.ad_accessory_name}" (state: ${this._stateLabel(this.adLastValue)}, uniqueId ${this.adUniqueId.slice(0, 12)}...)`);
+    // After DISCOVERY_WARN_MS, log a detailed warning with everything seen so far.
+    this._discoveryWarnTimer = setTimeout(() => {
+      if (this._discoveryComplete) return;
+      const seen = this._seenNames.size
+        ? [...this._seenNames].map(n => `"${n}"`).join(', ')
+        : '(nothing yet — socket may not have connected)';
+      if (!this.ssUniqueId) {
+        this.log.error(
+          `SimpliSafe accessory "${this.config.simplisafe_name}" not found after ${DISCOVERY_WARN_MS / 1000}s. ` +
+          `Service names seen so far: ${seen}`
+        );
+      }
+      if (!this.adUniqueId) {
+        this.log.error(
+          `AlarmDecoder accessory "${this.config.ad_accessory_name}" not found after ${DISCOVERY_WARN_MS / 1000}s. ` +
+          `Service names seen so far: ${seen}`
+        );
+      }
+      this.log.error(
+        'Tip: the names above must match the "Service Name" shown in the Homebridge UI → ' +
+        'Accessories tab (not the child bridge name). Update simplisafe_name / ad_accessory_name in config.'
+      );
+    }, DISCOVERY_WARN_MS);
   }
+
+  // ── Socket ────────────────────────────────────────────────────────────────
 
   _connectSocket() {
     if (this.socket) {
@@ -223,7 +217,6 @@ class SimpliSafeAlarmDecoderBridgePlatform {
 
     this.socket.on('connect', () => {
       this.log.info('Connected to Homebridge UI socket');
-      // Triggers initial accessory load + subscription to characteristic changes.
       this.socket.emit('get-accessories');
     });
 
@@ -254,12 +247,56 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     this._connectSocket();
   }
 
+  // ── Accessory data handler (discovery + monitoring) ───────────────────────
+
   _handleAccessoriesData(data) {
-    // Server sends either a single ServiceType (on per-characteristic update) or an array (on full refresh).
+    // Server sends either a single object (per-characteristic update) or an array (full refresh).
     const accessories = Array.isArray(data) ? data : [data];
 
     for (const acc of accessories) {
       if (!acc || !acc.uniqueId) continue;
+
+      const svcName = acc.serviceName ?? '';
+      if (svcName) this._seenNames.add(svcName);
+
+      // ── Discovery phase ──────────────────────────────────────────────────
+      if (!this._discoveryComplete) {
+        if (!this.ssUniqueId && svcName === this.config.simplisafe_name) {
+          if (acc.serviceCharacteristics?.find(c => c.type === 'SecuritySystemCurrentState')) {
+            this.ssUniqueId = acc.uniqueId;
+            this.ssLastValue = acc.values?.SecuritySystemCurrentState ?? null;
+            this.log.info(
+              `Found SS "${this.config.simplisafe_name}" ` +
+              `(state: ${this._stateLabel(this.ssLastValue)}, uniqueId: ${acc.uniqueId.slice(0, 12)}...)`
+            );
+          }
+        }
+
+        if (!this.adUniqueId && svcName === this.config.ad_accessory_name) {
+          if (acc.serviceCharacteristics?.find(c => c.type === 'SecuritySystemCurrentState')) {
+            this.adUniqueId = acc.uniqueId;
+            this.adLastValue = acc.values?.SecuritySystemCurrentState ?? null;
+            this.log.info(
+              `Found AD "${this.config.ad_accessory_name}" ` +
+              `(state: ${this._stateLabel(this.adLastValue)}, uniqueId: ${acc.uniqueId.slice(0, 12)}...)`
+            );
+          }
+        }
+
+        if (this.ssUniqueId && this.adUniqueId) {
+          this._discoveryComplete = true;
+          this.log.info('Both accessories discovered — bridge is active');
+        }
+
+        // During discovery, log every unique service name at INFO so the user
+        // can immediately see what names are available without needing debug mode.
+        if (!this._discoveryComplete) {
+          this.log.info(`[discovery] Saw accessory: "${svcName}" (uniqueId: ${acc.uniqueId.slice(0, 12)}...)`);
+        }
+      }
+
+      // ── Monitoring phase (only once discovered) ──────────────────────────
+      if (!this._discoveryComplete) continue;
 
       if (acc.uniqueId === this.ssUniqueId) {
         const newValue = acc.values?.SecuritySystemCurrentState;
@@ -278,6 +315,8 @@ class SimpliSafeAlarmDecoderBridgePlatform {
       }
     }
   }
+
+  // ── State bridging ────────────────────────────────────────────────────────
 
   // SimpliSafe → AlarmDecoder
   _handleSSChange(oldValue, newValue) {
@@ -363,6 +402,8 @@ class SimpliSafeAlarmDecoderBridgePlatform {
 
   _shutdown() {
     if (this.tokenTimer) clearTimeout(this.tokenTimer);
+    if (this._discoveryInterval) clearInterval(this._discoveryInterval);
+    if (this._discoveryWarnTimer) clearTimeout(this._discoveryWarnTimer);
     if (this.socket) {
       try { this.socket.disconnect(); } catch (_) {}
     }
