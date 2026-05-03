@@ -54,6 +54,28 @@
         "x-schema-form": {
           "type": "password"
         }
+      },
+      "hb_ui_url": {
+        "title": "Homebridge UI URL",
+        "type": "string",
+        "default": "http://localhost:8581",
+        "required": true,
+        "description": "Base URL of homebridge-config-ui-x. Used to query and observe accessories across child bridges."
+      },
+      "hb_ui_username": {
+        "title": "Homebridge UI Username",
+        "type": "string",
+        "required": true,
+        "description": "Admin username for homebridge-config-ui-x. Recommended: create a dedicated user for this plugin."
+      },
+      "hb_ui_password": {
+        "title": "Homebridge UI Password",
+        "type": "string",
+        "required": true,
+        "description": "Password for the Homebridge UI user above.",
+        "x-schema-form": {
+          "type": "password"
+        }
       }
     }
   },
@@ -69,6 +91,12 @@
     "ad_port",
     {
       "key": "ad_api_key",
+      "type": "password"
+    },
+    "hb_ui_url",
+    "hb_ui_username",
+    {
+      "key": "hb_ui_password",
       "type": "password"
     }
   ]
