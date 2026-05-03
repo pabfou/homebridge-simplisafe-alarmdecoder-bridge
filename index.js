@@ -227,9 +227,13 @@ class SimpliSafeAlarmDecoderBridgePlatform {
             this._handleSSChange(old, v);
           }
         } else if (acc.uniqueId === this.adUniqueId) {
-          const v = acc.values?.SecuritySystemCurrentState;
-          this.log.debug(`AD poll: currentState=${v} (last=${this.adLastValue})`);
-          if (v !== undefined && v !== this.adLastValue) {
+          const target = acc.values?.SecuritySystemTargetState;
+          const current = acc.values?.SecuritySystemCurrentState;
+          this.log.debug(`AD poll: targetState=${target} currentState=${current} (last=${this.adLastValue})`);
+          const v = (target !== undefined && target !== this.adLastValue) ? target
+            : (current !== undefined && current !== this.adLastValue) ? current
+            : undefined;
+          if (v !== undefined) {
             const old = this.adLastValue; this.adLastValue = v;
             this._handleADChange(old, v);
           }
@@ -308,7 +312,7 @@ class SimpliSafeAlarmDecoderBridgePlatform {
           if (acc.serviceCharacteristics?.find(c => c.type === 'SecuritySystemCurrentState')) {
             this.adUniqueId = acc.uniqueId;
             // Track CurrentState for AD (fires when panel confirms the change).
-            this.adLastValue = acc.values?.SecuritySystemCurrentState ?? null;
+            this.adLastValue = acc.values?.SecuritySystemTargetState ?? acc.values?.SecuritySystemCurrentState ?? null;
             this.log.info(`Found AD "${svcName}" (uniqueId: ${acc.uniqueId.slice(0, 12)}...)`);
           }
         }
@@ -333,9 +337,15 @@ class SimpliSafeAlarmDecoderBridgePlatform {
         }
 
       } else if (acc.uniqueId === this.adUniqueId) {
-        const v = acc.values?.SecuritySystemCurrentState;
-        this.log.debug(`AD socket: currentState=${v} (last=${this.adLastValue})`);
-        if (v !== undefined && v !== this.adLastValue) {
+        // Prefer TargetState (fires immediately on Home app tap);
+        // fall back to CurrentState (fires after panel confirms, or on physical keypad).
+        const target = acc.values?.SecuritySystemTargetState;
+        const current = acc.values?.SecuritySystemCurrentState;
+        this.log.debug(`AD socket: targetState=${target} currentState=${current} (last=${this.adLastValue})`);
+        const v = (target !== undefined && target !== this.adLastValue) ? target
+          : (current !== undefined && current !== this.adLastValue) ? current
+          : undefined;
+        if (v !== undefined) {
           const old = this.adLastValue; this.adLastValue = v;
           this._handleADChange(old, v);
         }
