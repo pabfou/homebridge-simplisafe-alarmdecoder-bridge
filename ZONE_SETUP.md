@@ -19,17 +19,18 @@ Program each zone in the Vista panel first. Repeat for zone 41 and zone 42.
 
 1. Enter programming mode: `[installer code]` + `800`
 2. Open zone programming: `*56`
-3. Enter zone number (`41` or `42`) → press `*`
-4. Press `*` to pass the summary screen
-5. Zone type → press `*` *(see table below)*
-6. Partition: `1` → press `*`
-7. Report code: `01` → press `*`
-8. Hardwire type: `1` → press `*` *(NC)*
-9. Response time: `1` → press `*` *(350 ms)*
-10. Input type: `2` → press `*` *(auxiliary wired)*
-11. Zone label: `0` → press `*` *(skip)*
-12. Exit zone programming: `00` → press `*`
-13. Repeat from step 3 for the other zone, then exit: `*99`
+3. Confirm: press `1` then `*` *(panel asks "set to confirm 0=no 1=yes")*
+4. Enter zone number (`41` or `42`) → press `*`
+5. Press `*` to pass the summary screen
+6. Zone type → press `*` *(see table below)*
+7. Partition: `1` → press `*`
+8. Report code: `01` → press `*`
+9. Hardwire type: `1` → press `*` *(NC)*
+10. Response time: `1` → press `*` *(350 ms)*
+11. Input type: `2` → press `*` *(auxiliary wired)*
+12. Zone label: `0` → press `*` *(skip)*
+13. Exit zone programming: `00` → press `*`
+14. Repeat from step 4 for the other zone, then exit: `*99`
 
 ### Zone Type (step 5)
 
