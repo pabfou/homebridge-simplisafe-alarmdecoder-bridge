@@ -363,6 +363,16 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     }
     const label = this._stateLabel(newValue);
     this.log.info(`SS target changed: ${this._stateLabel(oldValue)} → ${label} — sending to AlarmDecoder`);
+
+    // Zone fault/restore — independent of the keypress path.
+    if (this.config.ad_trigger_zone) {
+      if (newValue === 4) {
+        this._faultZone(this.config.ad_trigger_zone);
+      } else if (oldValue === 4) {
+        this._restoreZone(this.config.ad_trigger_zone);
+      }
+    }
+
     const keys = this._stateToKeys(newValue);
     if (keys !== null) this._sendToAlarmDecoder(keys, label);
   }
@@ -446,6 +456,44 @@ class SimpliSafeAlarmDecoderBridgePlatform {
       if (err.cause?.code === 'ENOTFOUND') {
         this.log.error('Tip: .local hostnames may not resolve on Linux. Try using the IP address for ad_host instead.');
       }
+    }
+  }
+
+  async _faultZone(zone) {
+    const { ad_host, ad_port, ad_api_key } = this.config;
+    const url = `http://${ad_host}:${ad_port}/api/v1/zones/${zone}/fault`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Authorization': ad_api_key },
+      });
+      if (response.ok) {
+        this.log.info(`AlarmDecoder zone ${zone} faulted`);
+      } else {
+        this.log.error(`Zone ${zone} fault failed: ${response.status} ${response.statusText}`);
+      }
+    } catch (err) {
+      const cause = err.cause ? ` (${err.cause.code ?? err.cause.message})` : '';
+      this.log.error(`Failed to fault zone ${zone}: ${err.message}${cause}`);
+    }
+  }
+
+  async _restoreZone(zone) {
+    const { ad_host, ad_port, ad_api_key } = this.config;
+    const url = `http://${ad_host}:${ad_port}/api/v1/zones/${zone}/restore`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Authorization': ad_api_key },
+      });
+      if (response.ok) {
+        this.log.info(`AlarmDecoder zone ${zone} restored`);
+      } else {
+        this.log.error(`Zone ${zone} restore failed: ${response.status} ${response.statusText}`);
+      }
+    } catch (err) {
+      const cause = err.cause ? ` (${err.cause.code ?? err.cause.message})` : '';
+      this.log.error(`Failed to restore zone ${zone}: ${err.message}${cause}`);
     }
   }
 

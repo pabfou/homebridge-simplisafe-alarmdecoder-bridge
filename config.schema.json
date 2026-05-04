@@ -55,6 +55,11 @@
           "type": "password"
         }
       },
+      "ad_trigger_zone": {
+        "title": "Alarm Trigger Zone",
+        "type": "integer",
+        "description": "Optional. Zone number to fault on the AlarmDecoder when SimpliSafe enters Alarm Triggered state, and restore when disarmed. Must be an emulated zone (9–48) configured in the AlarmDecoder webapp and programmed in the panel. Leave blank to disable."
+      },
       "hb_ui_url": {
         "title": "Homebridge UI URL",
         "type": "string",
@@ -93,6 +98,7 @@
       "key": "ad_api_key",
       "type": "password"
     },
+    "ad_trigger_zone",
     "hb_ui_url",
     "hb_ui_username",
     {

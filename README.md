@@ -29,6 +29,65 @@ Both directions are near-instant when triggered from the Home app (socket push).
 | Disarmed | 3 | `alarm_code` + `1` |
 | Alarm Triggered | 4 | *(no action)* |
 
+### Zone Trigger (SS Alarm → AlarmDecoder Zone Fault)
+
+When `ad_trigger_zone` is set, the bridge will **fault** a configurable emulated zone on the AlarmDecoder whenever SimpliSafe enters Alarm Triggered state, and **restore** it when SimpliSafe is disarmed. This causes the Vista panel to react to a SimpliSafe alarm as if a physical zone had tripped.
+
+This is a three-step setup: find an available zone → program it in the panel → add it to the plugin config.
+
+#### How it works
+
+The Vista panel only responds to software zone faults for zones that belong to a zone expander. The AlarmDecoder emulates these expanders in software — no physical hardware needed. Zones 1–8 are hardwired; zones 9–48 can be emulated.
+
+#### Step 1 — Find an available zone number
+
+1. Open the AlarmDecoder webapp → **Settings → Setup → EXP section**. Note which expanders are enabled (e.g. Expander 4 = zones 33–40).
+2. Open the **Zones** tab to see which zone numbers are already in use.
+3. Pick any zone number that falls in an enabled expander's range **and** does not appear in the Zones list. That is your `ad_trigger_zone`.
+
+| Expander | Zone range |
+|---|---|
+| 1 | 9 – 16 |
+| 2 | 17 – 24 |
+| 3 | 25 – 32 |
+| 4 | 33 – 40 |
+| 5 | 41 – 48 |
+
+> If no expanders are enabled yet, go to **Settings → Setup → EXP**, enable expander 1, then pick any zone from 9–16.
+
+> Zones outside 9–48 (e.g. RF zones) cannot be faulted via the AlarmDecoder zone API.
+
+#### Step 2 — Program the zone in the SafeWatch Pro 3000 / Vista 20P
+
+The Vista panel must be told that the emulated zone exists and what to do when it faults.
+
+1. **Enter programming mode**: at the keypad, type your installer code + `800`
+2. **Open zone programming**: type `*56`
+3. **Enter the zone number** (e.g. `39`), then press `*`
+4. Press `*` to pass the summary screen
+5. **Zone type**: enter `07` (24-hour audible — triggers siren + report at all times), then press `*`
+6. **Partition**: enter `1` (or your partition number), then press `*`
+7. **Report code**: enter `01`, then press `*`
+8. **Hardwire type**: enter `1` (NC — normally closed), then press `*`
+9. **Response time**: enter `1` (350 ms), then press `*`
+10. **Input type**: enter `2` (auxiliary wired), then press `*`
+11. **Zone label**: enter `0` to skip, then press `*`
+12. **Exit zone programming**: enter `00`, then press `*`
+13. **Exit programming mode**: type `*99`
+
+> Zone type `07` (24-hour audible) triggers the siren and sends a central station report regardless of armed state. Use `06` for a silent central-station-only report.
+
+#### Step 3 — Add `ad_trigger_zone` to the plugin config
+
+```json
+{
+  "platform": "SimpliSafeAlarmDecoderBridge",
+  "ad_trigger_zone": 39
+}
+```
+
+If `ad_trigger_zone` is omitted the feature is disabled and the plugin behaves exactly as before.
+
 ---
 
 ## Requirements
