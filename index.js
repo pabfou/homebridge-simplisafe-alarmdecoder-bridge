@@ -142,7 +142,10 @@ class SimpliSafeAlarmDecoderBridgePlatform {
           headers: { Authorization: `Bearer ${accessToken}` },
         });
         if (!authRes.ok) throw new Error(`SS authCheck failed (${authRes.status} ${authRes.statusText})`);
-        const { userId } = (await authRes.json()).data;
+        const authJson = await authRes.json();
+        const userId = authJson?.data?.userId ?? authJson?.userId ?? authJson?.id;
+        if (!userId) throw new Error(`Could not find userId in SS authCheck response: ${JSON.stringify(authJson)}`);
+        this.log.debug(`SS authCheck response structure: ${JSON.stringify(Object.keys(authJson))}`);
 
         const subRes = await fetch(
           `${SS_API_BASE}/users/${userId}/subscriptions?activeOnly=false`,
