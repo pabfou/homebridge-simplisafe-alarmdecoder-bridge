@@ -14,8 +14,7 @@
       "simplisafe_name": {
         "title": "SimpliSafe Accessory Name",
         "type": "string",
-        "required": true,
-        "description": "Display name of the SimpliSafe3 SecuritySystem accessory in HomeKit (must match exactly)."
+        "description": "Display name of the SimpliSafe3 SecuritySystem accessory in HomeKit. Required only for the AlarmDecoder → SimpliSafe direction (so the bridge can update SimpliSafe state when the panel is armed/disarmed at the keypad)."
       },
       "ad_accessory_name": {
         "title": "AlarmDecoder Accessory Name",
@@ -56,9 +55,14 @@
         }
       },
       "ad_trigger_zone": {
-        "title": "Alarm Trigger Zone",
+        "title": "Alarm Trigger Zone (Delayed)",
         "type": "integer",
-        "description": "Optional. Zone number to fault on the AlarmDecoder when SimpliSafe enters Alarm Triggered state, and restore when disarmed. Must be an emulated zone (9–48) configured in the AlarmDecoder webapp and programmed in the panel. Leave blank to disable."
+        "description": "Optional. Zone to fault when SimpliSafe alarm is triggered by a sensor (entry delay applies). Must be an emulated zone (9–48) programmed with zone type 01 in the panel. Leave blank to disable."
+      },
+      "ad_immediate_zone": {
+        "title": "Panic Immediate Zone",
+        "type": "integer",
+        "description": "Optional. Zone to fault immediately (no entry delay) when SimpliSafe alarm is triggered by a panic button. Must be an emulated zone (9–48) programmed with zone type 07 (24-hour audible). Leave blank to route all alarms to the delayed zone."
       },
       "hb_ui_url": {
         "title": "Homebridge UI URL",
@@ -99,6 +103,7 @@
       "type": "password"
     },
     "ad_trigger_zone",
+    "ad_immediate_zone",
     "hb_ui_url",
     "hb_ui_username",
     {

@@ -1,16 +1,32 @@
 'use strict';
 
 const { io } = require('socket.io-client');
+const WebSocket = require('ws');
+const path = require('path');
+const fs = require('fs');
 
 const PLUGIN_NAME = 'homebridge-simplisafe-alarmdecoder-bridge';
 const PLATFORM_NAME = 'SimpliSafeAlarmDecoderBridge';
 
-// How often to re-emit get-accessories until both are discovered.
 const DISCOVERY_POLL_MS = 8_000;
-// Log the full seen-names list after this many ms without discovery.
 const DISCOVERY_WARN_MS = 60_000;
-// How often to poll the REST API as a fallback to socket events.
 const STATE_POLL_MS = 3_000;
+
+const SS_API_BASE = 'https://api.simplisafe.com/v1';
+const SS_WS_URL   = 'wss://socketlink.prd.aser.simplisafe.com';
+
+// eventCid sets for arm/disarm/alarm events
+const SS_STAY_CIDS   = new Set([3441, 3491]);
+const SS_AWAY_CIDS   = new Set([3401, 3407, 3487, 3481]);
+const SS_DISARM_CIDS = new Set([1400, 1406, 1407]);
+const SS_ALARM_CIDS  = new Set([1110, 1120, 1132, 1134, 1154, 1159, 1162]);
+
+// alarmState string → HomeKit SecuritySystemCurrentState value
+const SS_ALARM_STATE_MAP = {
+  OFF: 3, HOME: 0, AWAY: 1,
+  HOME_COUNT: 0, AWAY_COUNT: 1,
+  ALARM: 4, ALARM_COUNT: 4,
+};
 
 const STATE_NAMES = {
   0: 'STAY_ARM',
@@ -30,19 +46,30 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     this.config = config || {};
     this.api = api;
 
+    // HB UI auth (used for AD side only)
     this.token = null;
     this.tokenExpiresAt = 0;
     this.tokenTimer = null;
 
+    // HB UI socket (AD monitoring only)
     this.socket = null;
 
-    this.ssUniqueId = null;
-    this.adUniqueId = null;
-    // SS: we track TargetState (fires immediately when user taps Home app).
-    // AD: we track CurrentState (fires when panel confirms the state change).
-    this.ssLastValue = null;
-    this.adLastValue = null;
+    // SimpliSafe direct connection
+    this.ssToken = null;
+    this.ssUserId = null;
+    this.ssSid = null;
+    this.ssWs = null;
+    this._ssReconnectTimer = null;
+    this._ssWatcher = null;
+    this._ssWatchDebounce = null;
 
+    // State tracking
+    this.ssLastValue = null;
+    this.adUniqueId = null;
+    this.adLastValue = null;
+    this._activatedZone = null; // 'immediate' | 'delayed' | null
+
+    // AD discovery
     this._discoveryComplete = false;
     this._discoveryInterval = null;
     this._discoveryWarnTimer = null;
@@ -67,7 +94,6 @@ class SimpliSafeAlarmDecoderBridgePlatform {
 
   _validateConfig() {
     const required = [
-      'simplisafe_name',
       'ad_accessory_name',
       'alarm_code',
       'ad_host',
@@ -88,13 +114,186 @@ class SimpliSafeAlarmDecoderBridgePlatform {
 
   async _init() {
     await new Promise(r => setTimeout(r, 5000));
-    await this._login();
+    // SS init and HB UI login are independent — run in parallel
+    await Promise.all([
+      this._initSS(),
+      this._login(),
+    ]);
     this._scheduleTokenRefresh();
     this._connectSocket();
     this._startDiscoveryPoller();
   }
 
-  // ── Auth ──────────────────────────────────────────────────────────────────
+  // ── SimpliSafe Direct API ─────────────────────────────────────────────────
+
+  async _initSS() {
+    const tokenPath = path.join(this.api.user.storagePath(), 'simplisafe3auth.json');
+    const maxAttempts = 10;
+    const retryDelay = 6000;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        if (!fs.existsSync(tokenPath)) throw new Error('simplisafe3auth.json not found — is homebridge-simplisafe3 installed and logged in?');
+        const raw = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+        if (!raw.accessToken) throw new Error('accessToken missing from simplisafe3auth.json');
+        const accessToken = raw.accessToken;
+
+        const authRes = await fetch(`${SS_API_BASE}/api/authCheck`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!authRes.ok) throw new Error(`SS authCheck failed (${authRes.status} ${authRes.statusText})`);
+        const { userId } = (await authRes.json()).data;
+
+        const subRes = await fetch(
+          `${SS_API_BASE}/users/${userId}/subscriptions?activeOnly=false`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        if (!subRes.ok) throw new Error(`SS subscriptions fetch failed (${subRes.status} ${subRes.statusText})`);
+        const subData = await subRes.json();
+        const sid = subData.subscriptions?.[0]?.sid;
+        if (!sid) throw new Error('No SimpliSafe subscription found');
+
+        this.ssToken = accessToken;
+        this.ssUserId = String(userId);
+        this.ssSid = sid;
+        this.log.info(`SimpliSafe: authenticated (userId=${userId}, sid=${sid})`);
+
+        await this._pollSSState();
+        this._connectSSSocket();
+        this._watchTokenFile(tokenPath);
+        return;
+      } catch (err) {
+        if (attempt === maxAttempts) {
+          this.log.error(`SimpliSafe direct connection failed after ${maxAttempts} attempts: ${err.message}`);
+          return; // non-fatal — AD side continues to work
+        }
+        this.log.warn(`SimpliSafe init attempt ${attempt}/${maxAttempts}: ${err.message} — retrying in ${retryDelay / 1000}s`);
+        await new Promise(r => setTimeout(r, retryDelay));
+      }
+    }
+  }
+
+  _connectSSSocket() {
+    if (this._ssReconnectTimer) { clearTimeout(this._ssReconnectTimer); this._ssReconnectTimer = null; }
+    if (this.ssWs) {
+      try { this.ssWs.removeAllListeners(); this.ssWs.close(); } catch (_) {}
+      this.ssWs = null;
+    }
+    if (!this.ssToken || !this.ssUserId) return;
+
+    const ws = new WebSocket(SS_WS_URL);
+    this.ssWs = ws;
+
+    ws.on('open', () => {
+      this.log.info('Connected to SimpliSafe WebSocket');
+      ws.send(JSON.stringify({
+        datacontenttype: 'application/json',
+        type: 'com.simplisafe.connection.identify',
+        time: new Date().toISOString(),
+        id: `ts:${Date.now()}`,
+        specversion: '1.0',
+        source: 'homebridge-simplisafe-alarmdecoder-bridge',
+        data: {
+          auth: { schema: 'bearer', token: this.ssToken },
+          join: [`uid:${this.ssUserId}`],
+        },
+      }));
+    });
+
+    ws.on('message', (raw) => {
+      try { this._handleSSEvent(JSON.parse(raw.toString())); }
+      catch (err) { this.log.error(`SS WS parse error: ${err.message}`); }
+    });
+
+    ws.on('close', (code, reason) => {
+      this.log.warn(`SS WebSocket closed (${code}): ${reason.toString() || 'no reason'} — reconnecting in 5s`);
+      this._ssReconnectTimer = setTimeout(() => this._connectSSSocket(), 5000);
+    });
+
+    ws.on('error', (err) => {
+      this.log.error(`SS WebSocket error: ${err.message}`);
+    });
+  }
+
+  _watchTokenFile(tokenPath) {
+    try {
+      this._ssWatcher = fs.watch(tokenPath, () => {
+        // Debounce — fs.watch can fire multiple events per single write
+        if (this._ssWatchDebounce) return;
+        this._ssWatchDebounce = setTimeout(() => {
+          this._ssWatchDebounce = null;
+          try {
+            const raw = JSON.parse(fs.readFileSync(tokenPath, 'utf8'));
+            if (raw.accessToken && raw.accessToken !== this.ssToken) {
+              this.log.info('SimpliSafe token refreshed — reconnecting SS WebSocket');
+              this.ssToken = raw.accessToken;
+              this._connectSSSocket();
+            }
+          } catch (err) {
+            this.log.warn(`Failed to read updated SS token file: ${err.message}`);
+          }
+        }, 500);
+      });
+    } catch (err) {
+      this.log.warn(`Could not watch SS token file: ${err.message}`);
+    }
+  }
+
+  _handleSSEvent(msg) {
+    const type = msg.type ?? '';
+    if (!type.startsWith('com.simplisafe.event')) return;
+
+    const data = msg.data ?? {};
+    if (String(data.sid) !== String(this.ssSid)) return;
+
+    const eventCid = data.eventCid;
+    const sensorType = data.sensorType;
+
+    let newValue;
+    if (SS_STAY_CIDS.has(eventCid))        newValue = 0; // STAY_ARM
+    else if (SS_AWAY_CIDS.has(eventCid))   newValue = 1; // AWAY_ARM
+    else if (SS_DISARM_CIDS.has(eventCid)) newValue = 3; // DISARMED
+    else if (SS_ALARM_CIDS.has(eventCid))  newValue = 4; // ALARM_TRIGGERED
+    else {
+      this.log.debug(`SS WS: unrecognised eventCid=${eventCid} — ignoring`);
+      return;
+    }
+
+    this.log.debug(`SS WS event: cid=${eventCid} sensorType=${sensorType} → ${this._stateLabel(newValue)}`);
+
+    if (newValue === this.ssLastValue) return;
+    const old = this.ssLastValue;
+    this.ssLastValue = newValue;
+    this._handleSSChange(old, newValue, sensorType);
+  }
+
+  async _pollSSState() {
+    if (!this.ssSid) return;
+    try {
+      const res = await fetch(`${SS_API_BASE}/subscriptions/${this.ssSid}/`, {
+        headers: { Authorization: `Bearer ${this.ssToken}` },
+      });
+      if (!res.ok) {
+        this.log.warn(`SS state poll failed: ${res.status} ${res.statusText}`);
+        return;
+      }
+      const data = await res.json();
+      const alarmState = data.subscription?.location?.system?.alarmState;
+      if (!alarmState) return;
+      const v = SS_ALARM_STATE_MAP[alarmState];
+      if (v === undefined) return;
+      this.log.debug(`SS poll: alarmState=${alarmState} → ${this._stateLabel(v)} (last=${this.ssLastValue})`);
+      if (v !== this.ssLastValue) {
+        const old = this.ssLastValue;
+        this.ssLastValue = v;
+        this._handleSSChange(old, v);
+      }
+    } catch (err) {
+      this.log.warn(`SS state poll error: ${err.message}`);
+    }
+  }
+
+  // ── HB UI Auth ────────────────────────────────────────────────────────────
 
   async _login() {
     const url = `${this.config.hb_ui_url}/api/auth/login`;
@@ -163,7 +362,7 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     this.tokenTimer = setTimeout(() => this._refreshToken(), delay);
   }
 
-  // ── REST helpers ──────────────────────────────────────────────────────────
+  // ── HB UI REST helpers ────────────────────────────────────────────────────
 
   async _fetchAccessories() {
     const url = `${this.config.hb_ui_url}/api/accessories`;
@@ -174,7 +373,7 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     return response.json();
   }
 
-  // ── Discovery ─────────────────────────────────────────────────────────────
+  // ── AD Discovery ──────────────────────────────────────────────────────────
 
   _startDiscoveryPoller() {
     this._discoveryInterval = setInterval(() => {
@@ -184,7 +383,7 @@ class SimpliSafeAlarmDecoderBridgePlatform {
         return;
       }
       if (this.socket?.connected) {
-        this.log.debug('Polling for accessories via socket...');
+        this.log.debug('Polling for AD accessory via socket...');
         this.socket.emit('get-accessories');
       }
     }, DISCOVERY_POLL_MS);
@@ -194,8 +393,7 @@ class SimpliSafeAlarmDecoderBridgePlatform {
       const seen = this._seenNames.size
         ? [...this._seenNames].map(n => `"${n}"`).join(', ')
         : '(nothing yet)';
-      if (!this.ssUniqueId) this.log.error(`SimpliSafe accessory "${this.config.simplisafe_name}" not found after ${DISCOVERY_WARN_MS / 1000}s. Seen: ${seen}`);
-      if (!this.adUniqueId) this.log.error(`AlarmDecoder accessory "${this.config.ad_accessory_name}" not found after ${DISCOVERY_WARN_MS / 1000}s. Seen: ${seen}`);
+      this.log.error(`AlarmDecoder accessory "${this.config.ad_accessory_name}" not found after ${DISCOVERY_WARN_MS / 1000}s. Seen: ${seen}`);
     }, DISCOVERY_WARN_MS);
   }
 
@@ -203,10 +401,8 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     this._discoveryComplete = true;
     if (this._discoveryInterval) { clearInterval(this._discoveryInterval); this._discoveryInterval = null; }
     if (this._discoveryWarnTimer) { clearTimeout(this._discoveryWarnTimer); this._discoveryWarnTimer = null; }
-    this.log.info('Both accessories discovered — bridge is active');
-    this.log.info(`SS "${this.config.simplisafe_name}" target=${this._stateLabel(this.ssLastValue)}, AD "${this.config.ad_accessory_name}" current=${this._stateLabel(this.adLastValue)}`);
-
-    // Start REST polling as a fallback to socket events.
+    this.log.info('AlarmDecoder accessory discovered — bridge is active');
+    this.log.info(`AD "${this.config.ad_accessory_name}" current=${this._stateLabel(this.adLastValue)}, SS current=${this._stateLabel(this.ssLastValue)}`);
     this._pollInterval = setInterval(() => this._pollState(), STATE_POLL_MS);
   }
 
@@ -214,40 +410,34 @@ class SimpliSafeAlarmDecoderBridgePlatform {
 
   async _pollState() {
     if (!this._discoveryComplete) return;
+    await Promise.all([
+      this._pollSSState(),
+      this._pollADState(),
+    ]);
+  }
+
+  async _pollADState() {
     try {
       const accessories = await this._fetchAccessories();
       for (const acc of accessories) {
-        if (!acc?.uniqueId) continue;
-        // Use the same characteristic as socket monitoring.
-        if (acc.uniqueId === this.ssUniqueId) {
-          const target = acc.values?.SecuritySystemTargetState;
-          const current = acc.values?.SecuritySystemCurrentState;
-          // ALARM_TRIGGERED (4) only appears as CurrentState.
-          const v = (current === 4) ? current : target;
-          this.log.debug(`SS poll: targetState=${target} currentState=${current} (last=${this.ssLastValue})`);
-          if (v !== undefined && v !== this.ssLastValue) {
-            const old = this.ssLastValue; this.ssLastValue = v;
-            this._handleSSChange(old, v);
-          }
-        } else if (acc.uniqueId === this.adUniqueId) {
-          const target = acc.values?.SecuritySystemTargetState;
-          const current = acc.values?.SecuritySystemCurrentState;
-          this.log.debug(`AD poll: targetState=${target} currentState=${current} (last=${this.adLastValue})`);
-          const v = (target !== undefined && target !== this.adLastValue) ? target
-            : (current !== undefined && current !== this.adLastValue) ? current
-            : undefined;
-          if (v !== undefined) {
-            const old = this.adLastValue; this.adLastValue = v;
-            this._handleADChange(old, v);
-          }
+        if (!acc?.uniqueId || acc.uniqueId !== this.adUniqueId) continue;
+        const target = acc.values?.SecuritySystemTargetState;
+        const current = acc.values?.SecuritySystemCurrentState;
+        this.log.debug(`AD poll: targetState=${target} currentState=${current} (last=${this.adLastValue})`);
+        const v = (target !== undefined && target !== this.adLastValue) ? target
+          : (current !== undefined && current !== this.adLastValue) ? current
+          : undefined;
+        if (v !== undefined) {
+          const old = this.adLastValue; this.adLastValue = v;
+          this._handleADChange(old, v);
         }
       }
     } catch (err) {
-      this.log.warn(`State poll error: ${err.message}`);
+      this.log.warn(`AD state poll error: ${err.message}`);
     }
   }
 
-  // ── Socket ────────────────────────────────────────────────────────────────
+  // ── HB UI Socket (AD monitoring only) ────────────────────────────────────
 
   _connectSocket() {
     if (this.socket) { try { this.socket.disconnect(); } catch (_) {} }
@@ -289,7 +479,7 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     this._connectSocket();
   }
 
-  // ── Accessory data handler (discovery + monitoring) ───────────────────────
+  // ── Accessory data handler (AD discovery + monitoring only) ───────────────
 
   _handleAccessoriesData(data) {
     const accessories = Array.isArray(data) ? data : [data];
@@ -300,52 +490,32 @@ class SimpliSafeAlarmDecoderBridgePlatform {
       const svcName = acc.serviceName ?? '';
       if (svcName) this._seenNames.add(svcName);
 
+      // ── Passive SS uniqueId capture (for AD→SS PUT) ──────────────────────
+      if (!this._ssUniqueId && this.config.simplisafe_name && svcName === this.config.simplisafe_name) {
+        if (acc.serviceCharacteristics?.find(c => c.type === 'SecuritySystemCurrentState')) {
+          this._ssUniqueId = acc.uniqueId;
+          this.log.info(`Found SS "${svcName}" in HB UI (uniqueId: ${acc.uniqueId.slice(0, 12)}...)`);
+        }
+      }
+
       // ── Discovery ────────────────────────────────────────────────────────
       if (!this._discoveryComplete) {
-        if (!this.ssUniqueId && svcName === this.config.simplisafe_name) {
-          if (acc.serviceCharacteristics?.find(c => c.type === 'SecuritySystemCurrentState')) {
-            this.ssUniqueId = acc.uniqueId;
-            // Track TargetState for SS (fires immediately on Home app tap).
-            this.ssLastValue = acc.values?.SecuritySystemTargetState ?? acc.values?.SecuritySystemCurrentState ?? null;
-            this.log.info(`Found SS "${svcName}" (uniqueId: ${acc.uniqueId.slice(0, 12)}...)`);
-          }
-        }
-
         if (!this.adUniqueId && svcName === this.config.ad_accessory_name) {
           if (acc.serviceCharacteristics?.find(c => c.type === 'SecuritySystemCurrentState')) {
             this.adUniqueId = acc.uniqueId;
-            // Track CurrentState for AD (fires when panel confirms the change).
             this.adLastValue = acc.values?.SecuritySystemTargetState ?? acc.values?.SecuritySystemCurrentState ?? null;
             this.log.info(`Found AD "${svcName}" (uniqueId: ${acc.uniqueId.slice(0, 12)}...)`);
+            this._onDiscoveryComplete();
           }
         }
-
-        if (this.ssUniqueId && this.adUniqueId && !this._discoveryComplete) {
-          this._onDiscoveryComplete();
-        }
-
         if (!this._discoveryComplete) {
           this.log.info(`[discovery] Saw accessory: "${svcName}" (uniqueId: ${acc.uniqueId.slice(0, 12)}...)`);
           continue;
         }
       }
 
-      // ── Monitoring (SS: TargetState, AD: CurrentState) ───────────────────
-      if (acc.uniqueId === this.ssUniqueId) {
-        const target = acc.values?.SecuritySystemTargetState;
-        const current = acc.values?.SecuritySystemCurrentState;
-        // ALARM_TRIGGERED (4) only appears as CurrentState — use it when present,
-        // otherwise prefer TargetState (fires immediately on Home app tap).
-        const v = (current === 4) ? current : target;
-        this.log.debug(`SS socket: targetState=${target} currentState=${current} (last=${this.ssLastValue})`);
-        if (v !== undefined && v !== this.ssLastValue) {
-          const old = this.ssLastValue; this.ssLastValue = v;
-          this._handleSSChange(old, v);
-        }
-
-      } else if (acc.uniqueId === this.adUniqueId) {
-        // Prefer TargetState (fires immediately on Home app tap);
-        // fall back to CurrentState (fires after panel confirms, or on physical keypad).
+      // ── Monitoring ───────────────────────────────────────────────────────
+      if (acc.uniqueId === this.adUniqueId) {
         const target = acc.values?.SecuritySystemTargetState;
         const current = acc.values?.SecuritySystemCurrentState;
         this.log.debug(`AD socket: targetState=${target} currentState=${current} (last=${this.adLastValue})`);
@@ -362,29 +532,45 @@ class SimpliSafeAlarmDecoderBridgePlatform {
 
   // ── State bridging ────────────────────────────────────────────────────────
 
-  // SimpliSafe → AlarmDecoder (triggered by SS TargetState change)
-  _handleSSChange(oldValue, newValue) {
-    if (this.adLastValue === newValue) {
-      this.log.debug(`SS → ${this._stateLabel(newValue)}; AD already there — skipping`);
-      return;
-    }
+  // SimpliSafe → AlarmDecoder
+  _handleSSChange(oldValue, newValue, sensorType = null) {
     const label = this._stateLabel(newValue);
-    this.log.info(`SS target changed: ${this._stateLabel(oldValue)} → ${label} — sending to AlarmDecoder`);
+    this.log.info(`SS changed: ${this._stateLabel(oldValue)} → ${label}`);
 
-    // Zone fault/restore — independent of the keypress path.
-    if (this.config.ad_trigger_zone) {
-      if (newValue === 4) {
-        this._faultZone(this.config.ad_trigger_zone);
-      } else if (oldValue === 4) {
+    // Zone fault/restore — runs regardless of AD sync state
+    if (newValue === 4) {
+      const isPanic = sensorType === 3; // PANIC_BUTTON
+      const immediateZone = this.config.ad_immediate_zone;
+      const delayedZone = this.config.ad_trigger_zone;
+
+      if (isPanic && immediateZone) {
+        this.log.info('Panic button detected — faulting immediate zone');
+        this._activatedZone = 'immediate';
+        this._faultZone(immediateZone);
+      } else if (delayedZone) {
+        this.log.info(`${isPanic ? 'Panic (no immediate zone configured)' : 'Sensor triggered'} — faulting delayed zone`);
+        this._activatedZone = 'delayed';
+        this._faultZone(delayedZone);
+      }
+    } else if (oldValue === 4) {
+      if (this._activatedZone === 'immediate' && this.config.ad_immediate_zone) {
+        this._restoreZone(this.config.ad_immediate_zone);
+      } else if (this._activatedZone === 'delayed' && this.config.ad_trigger_zone) {
         this._restoreZone(this.config.ad_trigger_zone);
       }
+      this._activatedZone = null;
     }
 
+    // AD keypress sync — skip if already in sync
+    if (this.adLastValue === newValue) {
+      this.log.debug(`SS → ${label}; AD already there — skipping keypress`);
+      return;
+    }
     const keys = this._stateToKeys(newValue);
     if (keys !== null) this._sendToAlarmDecoder(keys, label);
   }
 
-  // AlarmDecoder → SimpliSafe (triggered by AD CurrentState change)
+  // AlarmDecoder → SimpliSafe
   async _handleADChange(oldValue, newValue) {
     if (this.ssLastValue === newValue) {
       this.log.debug(`AD → ${this._stateLabel(newValue)}; SS already there — skipping`);
@@ -399,15 +585,21 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     }
 
     try {
-      const url = `${this.config.hb_ui_url}/api/accessories/${this.ssUniqueId}`;
-      const response = await fetch(url, {
+      const url = `${this.config.hb_ui_url}/api/accessories/${this.ssUniqueId ?? this.adUniqueId}`;
+      // We no longer have ssUniqueId — use the HB UI to find SS by name if needed.
+      // For AD→SS we need the SS accessory uniqueId. Fetch it on-demand.
+      const ssUniqueId = await this._getSSUniqueId();
+      if (!ssUniqueId) {
+        this.log.error('Cannot update SS state — SS accessory not found in Homebridge UI');
+        return;
+      }
+      const response = await fetch(`${this.config.hb_ui_url}/api/accessories/${ssUniqueId}`, {
         method: 'PUT',
         headers: {
           'Authorization': `Bearer ${this.token}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          // SecuritySystemTargetState is the writable characteristic that triggers arm/disarm.
           characteristicType: 'SecuritySystemTargetState',
           value: newValue,
         }),
@@ -421,6 +613,25 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     } catch (err) {
       this.log.error(`Error updating SS state: ${err.message}`);
     }
+  }
+
+  // Lazily fetch and cache the SS accessory uniqueId from the HB UI (needed for AD→SS PUT).
+  async _getSSUniqueId() {
+    if (this._ssUniqueId) return this._ssUniqueId;
+    if (!this.config.simplisafe_name) return null;
+    try {
+      const accessories = await this._fetchAccessories();
+      for (const acc of accessories) {
+        if ((acc.serviceName ?? '') === this.config.simplisafe_name &&
+            acc.serviceCharacteristics?.find(c => c.type === 'SecuritySystemCurrentState')) {
+          this._ssUniqueId = acc.uniqueId;
+          return acc.uniqueId;
+        }
+      }
+    } catch (err) {
+      this.log.warn(`Could not fetch SS uniqueId from HB UI: ${err.message}`);
+    }
+    return null;
   }
 
   _stateToKeys(state) {
@@ -509,6 +720,10 @@ class SimpliSafeAlarmDecoderBridgePlatform {
     if (this._discoveryInterval) clearInterval(this._discoveryInterval);
     if (this._discoveryWarnTimer) clearTimeout(this._discoveryWarnTimer);
     if (this._pollInterval) clearInterval(this._pollInterval);
+    if (this._ssReconnectTimer) clearTimeout(this._ssReconnectTimer);
+    if (this._ssWatchDebounce) clearTimeout(this._ssWatchDebounce);
+    if (this._ssWatcher) { try { this._ssWatcher.close(); } catch (_) {} }
+    if (this.ssWs) { try { this.ssWs.removeAllListeners(); this.ssWs.close(); } catch (_) {} }
     if (this.socket) { try { this.socket.disconnect(); } catch (_) {} }
   }
 }
