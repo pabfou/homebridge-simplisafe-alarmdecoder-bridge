@@ -1,4 +1,15 @@
-# Zone 41 Setup — AlarmDecoder + SafeWatch Pro 3000
+# Zone Setup — AlarmDecoder + SafeWatch Pro 3000
+
+Two zones are used:
+
+| Zone | Purpose | Panel type | Triggered by |
+|---|---|---|---|
+| **41** | Delayed trigger | `01` Entry/Exit 1 — entry delay applies | Any sensor trip |
+| **42** | Immediate trigger | `07` 24-hr audible — siren fires instantly | Panic button only |
+
+Both zones are optional. You can configure just zone 41, just zone 42, or both.
+
+---
 
 ## Part 1 — AlarmDecoder Webapp
 
@@ -7,22 +18,26 @@
 2. Find the **EXP** section and check **Expander 5** (covers zones 41–48)
 3. Click **Save**
 
-**Step 2: Add zone 41**
+**Step 2: Add the zones**
+
+Repeat for each zone you want to use:
 1. Go to the **Zones** tab → click **New Zone**
 2. Fill in:
-   - **Zone ID**: `41`
-   - **Name**: `SimpliSafe Alarm Trigger`
+   - **Zone ID**: `41` (delayed) and/or `42` (immediate)
+   - **Name**: e.g. `SimpliSafe Delayed Trigger` / `SimpliSafe Panic Trigger`
 3. Click **Save**
 
 ---
 
 ## Part 2 — SafeWatch Pro 3000 Keypad
 
+Repeat these steps for each zone (41 and/or 42), using the appropriate zone type in step 5.
+
 1. Enter programming mode: `[installer code]` + `800`
 2. Open zone programming: `*56`
-3. Enter zone number: `41` → press `*`
+3. Enter zone number (`41` or `42`) → press `*`
 4. Press `*` to pass the summary screen
-5. Zone type → press `*` *(choose one — see options below)*
+5. Zone type → press `*` *(see table below)*
 6. Partition: `1` → press `*`
 7. Report code: `01` → press `*`
 8. Hardwire type: `1` → press `*` *(NC)*
@@ -32,22 +47,27 @@
 12. Exit zone programming: `00` → press `*`
 13. Exit programming mode: `*99`
 
-### Zone Type Options (step 5)
+### Zone Type (step 5)
 
-| Type | Code | Behavior |
+| Zone | Type code | Behavior |
 |---|---|---|
-| Entry/Exit 1 | `01` | Entry delay applies before siren sounds — time to enter your code first *(recommended)* |
-| 24-hour audible | `07` | Siren fires immediately, no delay, regardless of arm state |
+| 41 — delayed | `01` | Entry delay applies — time to enter your code before siren sounds |
+| 42 — immediate | `07` | Siren fires instantly, no delay, regardless of arm state |
 
 ---
 
 ## Part 3 — Plugin Config
 
-Add `ad_trigger_zone` to your Homebridge config and restart Homebridge:
+Add to your Homebridge config and restart Homebridge:
 
 ```json
 {
   "platform": "SimpliSafeAlarmDecoderBridge",
-  "ad_trigger_zone": 41
+  "ad_trigger_zone": 41,
+  "ad_immediate_zone": 42
 }
 ```
+
+- `ad_trigger_zone` — faulted on any sensor-triggered alarm (entry delay)
+- `ad_immediate_zone` — faulted on panic button only (immediate siren)
+- Either field can be omitted to disable that zone
