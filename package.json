@@ -1,6 +1,6 @@
 {
   "name": "homebridge-simplisafe-alarmdecoder-bridge",
-  "version": "1.3.0-beta.1",
+  "version": "1.3.0-beta.2",
   "description": "Homebridge platform plugin that bidirectionally bridges SimpliSafe3 HomeKit state changes to an AlarmDecoder/Vista 20P alarm panel.",
   "main": "index.js",
   "keywords": [

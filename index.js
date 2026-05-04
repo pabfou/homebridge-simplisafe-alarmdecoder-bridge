@@ -220,8 +220,11 @@ class SimpliSafeAlarmDecoderBridgePlatform {
         if (!acc?.uniqueId) continue;
         // Use the same characteristic as socket monitoring.
         if (acc.uniqueId === this.ssUniqueId) {
-          const v = acc.values?.SecuritySystemTargetState;
-          this.log.debug(`SS poll: targetState=${v} (last=${this.ssLastValue})`);
+          const target = acc.values?.SecuritySystemTargetState;
+          const current = acc.values?.SecuritySystemCurrentState;
+          // ALARM_TRIGGERED (4) only appears as CurrentState.
+          const v = (current === 4) ? current : target;
+          this.log.debug(`SS poll: targetState=${target} currentState=${current} (last=${this.ssLastValue})`);
           if (v !== undefined && v !== this.ssLastValue) {
             const old = this.ssLastValue; this.ssLastValue = v;
             this._handleSSChange(old, v);
@@ -329,8 +332,12 @@ class SimpliSafeAlarmDecoderBridgePlatform {
 
       // ── Monitoring (SS: TargetState, AD: CurrentState) ───────────────────
       if (acc.uniqueId === this.ssUniqueId) {
-        const v = acc.values?.SecuritySystemTargetState;
-        this.log.debug(`SS socket: targetState=${v} (last=${this.ssLastValue})`);
+        const target = acc.values?.SecuritySystemTargetState;
+        const current = acc.values?.SecuritySystemCurrentState;
+        // ALARM_TRIGGERED (4) only appears as CurrentState — use it when present,
+        // otherwise prefer TargetState (fires immediately on Home app tap).
+        const v = (current === 4) ? current : target;
+        this.log.debug(`SS socket: targetState=${target} currentState=${current} (last=${this.ssLastValue})`);
         if (v !== undefined && v !== this.ssLastValue) {
           const old = this.ssLastValue; this.ssLastValue = v;
           this._handleSSChange(old, v);
