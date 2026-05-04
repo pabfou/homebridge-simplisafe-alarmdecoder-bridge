@@ -39,11 +39,15 @@ This is a three-step setup: find an available zone → program it in the panel �
 
 The Vista panel only responds to software zone faults for zones that belong to a zone expander. The AlarmDecoder emulates these expanders in software — no physical hardware needed. Zones 1–8 are hardwired; zones 9–48 can be emulated.
 
-#### Step 1 — Find an available zone number
+#### Step 1 — Add the zone in the AlarmDecoder webapp
 
-1. Open the AlarmDecoder webapp → **Settings → Setup → EXP section**. Note which expanders are enabled (e.g. Expander 4 = zones 33–40).
-2. Open the **Zones** tab to see which zone numbers are already in use.
-3. Pick any zone number that falls in an enabled expander's range **and** does not appear in the Zones list. That is your `ad_trigger_zone`.
+1. Open the AlarmDecoder webapp → **Zones** tab → click **New Zone**
+2. Fill in the form:
+   - **Zone ID**: pick any unused number between 9 and 48 (e.g. `39`). This becomes your `ad_trigger_zone`.
+   - **Name**: e.g. `SimpliSafe Alarm Trigger`
+   - **Description**: optional
+3. Click **Save**
+4. Go to **Settings → Setup → EXP** and confirm that the expander covering your chosen zone is enabled:
 
 | Expander | Zone range |
 |---|---|
@@ -53,7 +57,7 @@ The Vista panel only responds to software zone faults for zones that belong to a
 | 4 | 33 – 40 |
 | 5 | 41 – 48 |
 
-> If no expanders are enabled yet, go to **Settings → Setup → EXP**, enable expander 1, then pick any zone from 9–16.
+> If the expander for your zone isn't enabled, enable it in the EXP section and save.
 
 > Zones outside 9–48 (e.g. RF zones) cannot be faulted via the AlarmDecoder zone API.
 
